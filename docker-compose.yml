@@ -1,0 +1,61 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: jobs
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+
+  api:
+    build: .
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+psycopg2://app:app@postgres:5432/jobs
+      RABBITMQ_URL: amqp://app:app@rabbitmq:5672/
+      SCHEDULER_SEGMENTS: "0-127"  # single scheduler gets all segments by default
+    depends_on:
+      - postgres
+      - rabbitmq
+    ports:
+      - "8000:8000"
+
+  scheduler:
+    build: .
+    command: python -m src.scheduler.main
+    environment:
+      DATABASE_URL: postgresql+psycopg2://app:app@postgres:5432/jobs
+      RABBITMQ_URL: amqp://app:app@rabbitmq:5672/
+      SCHEDULER_SEGMENTS: "0-127"
+      LEADER_LOCK_KEY: "424242"  # pg advisory lock key
+    depends_on:
+      - postgres
+      - rabbitmq
+
+  worker:
+    build: .
+    command: python -m src.worker.main
+    environment:
+      DATABASE_URL: postgresql+psycopg2://app:app@postgres:5432/jobs
+      RABBITMQ_URL: amqp://app:app@rabbitmq:5672/
+      WORKER_ID: "w-${HOSTNAME:-local}"
+      MAX_CONCURRENCY: "4"
+    depends_on:
+      - postgres
+      - rabbitmq
+
+volumes:
+  pgdata:
