@@ -51,7 +51,6 @@ def run_task(body: dict) -> str:
         return "ack"
 
     except Exception as e:
-        # retry bookkeeping
         with session_scope() as s:
             rc, mr, freq, cron = s.execute(text(
                 "SELECT retry_count, max_retries, frequency, cron FROM jobs WHERE id=:jid"
