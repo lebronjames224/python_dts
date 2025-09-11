@@ -40,9 +40,19 @@ def run_task(body: dict) -> str:
                 "VALUES (:jid, :wid, 'running') RETURNING id"
             ), {"jid": job_id, "wid": settings.worker_id}).fetchone()
             exec_id = row[0]
+        
+        with session_scope() as s:
+            name, payload = s.execute(text(
+                "SELECT name, payload FROM jobs WHERE id = :jid"
+            ), {"jid": job_id}).fetchone()
 
-        task_fn = TASKS.get("echo")
-        task_fn and task_fn(f"job={job_id}")
+        task_fn = TASKS.get(name)
+        print(task_fn)
+        if not task_fn:
+           
+            raise RuntimeError(f"Unknown task: {name!r}")
+
+        task_fn(payload or "") 
 
         with session_scope() as s:
             s.execute(text("UPDATE job_executions SET status='completed', finished_at=NOW() WHERE id=:eid"),
