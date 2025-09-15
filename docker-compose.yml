@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   postgres:
     image: postgres:16
@@ -8,6 +7,11 @@ services:
       POSTGRES_DB: jobs
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d jobs"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -16,59 +20,75 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
-    environment:
-      RABBITMQ_DEFAULT_USER: app
-      RABBITMQ_DEFAULT_PASS: app
-
-  api:
-    build: .
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
-    environment:
-      DATABASE_URL: postgresql+psycopg2://app:app@postgres:5432/jobs
-      RABBITMQ_URL: amqp://app:app@rabbitmq:5672/
-      SCHEDULER_SEGMENTS: "0-127"  # single scheduler gets all segments by default
-    depends_on:
-      - postgres
-      - rabbitmq
-    ports:
-      - "8000:8000"
-
-  scheduler:
-    build: .
-    command: python -m src.scheduler.main
-    environment:
-      DATABASE_URL: postgresql+psycopg2://app:app@postgres:5432/jobs
-      RABBITMQ_URL: amqp://app:app@rabbitmq:5672/
-      SCHEDULER_SEGMENTS: "0-127"
-      LEADER_LOCK_KEY: "424242"  # pg advisory lock key
-    depends_on:
-      - postgres
-      - rabbitmq
-
-  worker:
-    build: .
-    command: python -m src.worker.main
-    environment:
-      DATABASE_URL: postgresql+psycopg2://app:app@postgres:5432/jobs
-      RABBITMQ_URL: amqp://app:app@rabbitmq:5672/
-      WORKER_ID: "w-${HOSTNAME:-local}"
-      MAX_CONCURRENCY: "4"
-    depends_on:
-      - postgres
-      - rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
 
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"   # S3-compatible API
-      - "9001:9001"   # Web console
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes:
       - minio_data:/data
 
+  # single app image reused by api/worker/scheduler
+  api:
+    build: .
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - .:/app  # hot-reload in dev; remove in prod
+
+  scheduler:
+    build: .
+    command: python -m src.scheduler.main
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  worker:
+    build: .
+    command: python -m src.worker.main
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
 volumes:
-  pgdata: 
-  minio_data:
+  pgdata: {}
+  rabbitmq_data: {}
+  minio_data: {}

@@ -1,6 +1,5 @@
 .env
 .gitignore
-requirements.txt
 # Ignore Python bytecode
 *.pyc
 __pycache__/
