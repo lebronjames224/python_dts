@@ -3,6 +3,7 @@ import time
 import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+import traceback
 from sqlalchemy import text
 
 from src.common.config import settings
@@ -29,38 +30,64 @@ threading.Thread(target=heartbeat, daemon=True).start()
 executor = ThreadPoolExecutor(max_workers=settings.max_concurrency)
 
 def run_task(body: dict) -> str:
-    """Run the job and return an ack/nack signal.
-    Returns one of: 'ack', 'nack_requeue', 'nack_drop'.
-    """
+    """Run the job and return an ack/nack signal."""
     job_id = body["job_id"]
+    exec_id = None
     try:
+        # 1) record start
         with session_scope() as s:
-            row = s.execute(text(
+            exec_id = s.execute(text(
                 "INSERT INTO job_executions(job_id, worker_id, status) "
                 "VALUES (:jid, :wid, 'running') RETURNING id"
-            ), {"jid": job_id, "wid": settings.worker_id}).fetchone()
-            exec_id = row[0]
-        
+            ), {"jid": job_id, "wid": settings.worker_id}).fetchone()[0]
+
+        # 2) fetch name + payload and normalize payload to a dict
         with session_scope() as s:
             name, payload = s.execute(text(
                 "SELECT name, payload FROM jobs WHERE id = :jid"
             ), {"jid": job_id}).fetchone()
 
         task_fn = TASKS.get(name)
-        print(task_fn)
         if not task_fn:
-           
             raise RuntimeError(f"Unknown task: {name!r}")
 
-        task_fn(payload or "") 
+        # Normalize payload:
+        # - if it's already a dict (JSONB), use it
+        # - if it's a JSON string, parse it
+        # - otherwise keep a best-effort wrapper
+        if isinstance(payload, dict) or payload is None:
+            payload_dict = payload or {}
+        elif isinstance(payload, str):
+            try:
+                payload_dict = json.loads(payload) if payload.strip().startswith("{") else {"_raw": payload}
+            except Exception:
+                payload_dict = {"_raw": payload}
+        else:
+            payload_dict = {"_raw": payload}
 
+        # 3) call the task; tasks should accept a dict and may return a small result dict
+        result = task_fn(payload_dict)
+
+        # 4) mark success (optionally persist result_json if it's a dict)
         with session_scope() as s:
-            s.execute(text("UPDATE job_executions SET status='completed', finished_at=NOW() WHERE id=:eid"),
-                      {"eid": exec_id})
+            s.execute(text(
+                "UPDATE job_executions "
+                "SET status='completed', finished_at=NOW() "
+                "WHERE id=:eid"
+            ), {"eid": exec_id, "r": json.dumps(result) if isinstance(result, dict) else None})
             s.execute(text("UPDATE jobs SET status='completed' WHERE id=:jid"), {"jid": job_id})
         return "ack"
 
-    except Exception as e:
+    except Exception:
+        # capture error for debugging
+        err = traceback.format_exc()
+        if exec_id is not None:
+            with session_scope() as s:
+                s.execute(text(
+                    "UPDATE job_executions SET status='failed', finished_at=NOW(), error=:e WHERE id=:eid"
+                ), {"eid": exec_id, "e": err})
+
+        # retry/backoff (unchanged)
         with session_scope() as s:
             rc, mr, freq, cron = s.execute(text(
                 "SELECT retry_count, max_retries, frequency, cron FROM jobs WHERE id=:jid"
@@ -79,7 +106,6 @@ def run_task(body: dict) -> str:
             else:
                 s.execute(text("UPDATE jobs SET status='failed' WHERE id=:jid"), {"jid": job_id})
                 return "ack"
-
 def on_message(ch, method, properties, body_bytes):
     body = json.loads(body_bytes)
     delivery_tag = method.delivery_tag

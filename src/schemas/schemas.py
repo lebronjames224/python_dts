@@ -1,9 +1,9 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Optional
 
 class JobCreate(BaseModel):
     name: str
-    payload: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
     frequency: str = "once" 
     cron: Optional[str] = None
     next_run_time: Optional[int] = None  

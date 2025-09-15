@@ -9,6 +9,11 @@ class Settings:
     leader_lock_key: int = int(os.getenv("LEADER_LOCK_KEY", "424242"))
     max_concurrency: int = int(os.getenv("MAX_CONCURRENCY", "4"))
     worker_id: str = os.getenv("WORKER_ID", "w-local")
+    minio_endpoint: str = "http://127.0.0.1:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_bucket: str = "crawls"
+    minio_region: str | None = "us-east-1"
 
 settings = Settings()
 
