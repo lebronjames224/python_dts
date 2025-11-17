@@ -1,43 +1,56 @@
-import json, pika
-from src.common.config import settings
+import json
+import pika
+from pika.exceptions import AMQPConnectionError
 
-QUEUE_NAME = "jobs"
+from src.common.config import settings
+from src.common.logging import get_logger
+
+logger = get_logger(__name__)
 
 class Rabbit:
-    def __init__(self, heartbeat: int = 0):  # default 0 for idle publishers
+    def __init__(self, heartbeat: int | None = None, queue_name: str | None = None):
+        hb = settings.rabbitmq_heartbeat if heartbeat is None else heartbeat
         self.params = pika.URLParameters(settings.rabbitmq_url)
-        self.params.heartbeat = heartbeat
+        self.params.heartbeat = hb
         self.params.blocked_connection_timeout = 300
         self.params.connection_attempts = 5
         self.params.retry_delay = 2
+        self.queue_name = queue_name or settings.rabbitmq_queue
         self._connect()
 
     def _connect(self):
-        self.conn = pika.BlockingConnection(self.params)
+        try:
+            self.conn = pika.BlockingConnection(self.params)
+        except AMQPConnectionError as exc:
+            logger.error("RabbitMQ connection failed: %s", exc)
+            raise
         self.ch = self.conn.channel()
-        self.ch.queue_declare(queue=QUEUE_NAME, durable=True)
+        self.ch.queue_declare(queue=self.queue_name, durable=True)
+        logger.info("Connected to RabbitMQ queue=%s", self.queue_name)
 
     def publish(self, body: dict, retry: bool = True):
         payload = json.dumps(body).encode()
         try:
             self.ch.basic_publish(
-                exchange="", routing_key=QUEUE_NAME, body=payload,
+                exchange="", routing_key=self.queue_name, body=payload,
                 properties=pika.BasicProperties(delivery_mode=2),
             )
         except Exception:
             if not retry:
                 raise
             # Reconnect once and retry
+            logger.warning("Rabbit publish failed, retrying after reconnect")
             self._connect()
             self.ch.basic_publish(
-                exchange="", routing_key=QUEUE_NAME, body=payload,
+                exchange="", routing_key=self.queue_name, body=payload,
                 properties=pika.BasicProperties(delivery_mode=2),
             )
 
     # (workers still need these; scheduler won’t use them)
     def consume(self, on_message):
-        self.ch.basic_qos(prefetch_count=settings.max_concurrency)
-        self.ch.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message, auto_ack=False)
+        prefetch = settings.rabbitmq_prefetch or settings.max_concurrency
+        self.ch.basic_qos(prefetch_count=prefetch)
+        self.ch.basic_consume(queue=self.queue_name, on_message_callback=on_message, auto_ack=False)
         self.ch.start_consuming()
 
     def ack_threadsafe(self, delivery_tag):
